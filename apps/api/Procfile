@@ -1,0 +1,2 @@
+# apps/api/Procfile
+web: node dist/main.js

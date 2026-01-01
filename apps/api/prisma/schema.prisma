@@ -1,0 +1,260 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  phone     String?
+  role      UserRole
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  driver    Driver?
+  jobs      Job[]    @relation("UserJobs")
+}
+
+enum UserRole {
+  customer
+  driver
+  ops
+}
+
+model Driver {
+  id              String             @id @default(uuid())
+  userId          String             @unique
+  user            User               @relation(fields: [userId], references: [id])
+  legalName       String
+  companyName     String?
+  vatNo           String?
+  rating          Float?
+  isBrandPartner  Boolean            @default(false)
+  fastPayEligible Boolean            @default(false)
+  vehicles        Vehicle[]
+  payouts         Payout[]
+  offers          JobOffer[]
+  compliance      ComplianceDocument[] @relation("DriverCompliance")
+  createdAt       DateTime           @default(now())
+}
+
+model Vehicle {
+  id           String      @id @default(uuid())
+  driverId     String
+  driver       Driver      @relation(fields: [driverId], references: [id])
+  type         VehicleType
+  reg          String
+  year         Int
+  capacityKg   Int?
+  refrigerated Boolean     @default(false)
+}
+
+enum VehicleType {
+  Bike
+  SWB
+  LWB
+  Luton
+}
+
+model Job {
+  id                 String            @id @default(uuid())
+  customerId         String
+  customer           User              @relation("UserJobs", fields: [customerId], references: [id])
+  pickupAddr         String
+  pickupPostcode     String
+  pickupTs           DateTime
+  deliveryAddr       String
+  deliveryPostcode   String
+  deliveryTs         DateTime
+  description        String?
+  category           JobCategory       @default(general)
+  specialRequirements Json?
+  estDistanceKm      Float?
+  pricing            Json?
+  status             JobStatus         @default(created)
+  events             JobEvent[]
+  offers             JobOffer[]
+  exchangePostings   ExchangePosting[]
+  pod                POD?
+  payment            Payment?
+  payouts            Payout[]
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+}
+
+enum JobCategory {
+  general
+  medical
+  legal
+}
+
+enum JobStatus {
+  created
+  offered
+  accepted
+  picked_up
+  delivered
+  exception
+}
+
+model JobEvent {
+  id    String       @id @default(uuid())
+  jobId String
+  job   Job          @relation(fields: [jobId], references: [id])
+  type  JobEventType
+  ts    DateTime     @default(now())
+  meta  Json?
+  @@index([jobId, ts])
+}
+
+enum JobEventType {
+  created
+  offered
+  accepted
+  picked_up
+  delivered
+  exception
+}
+
+model JobOffer {
+  id                 String       @id @default(uuid())
+  jobId              String
+  job                Job          @relation(fields: [jobId], references: [id])
+  driverId           String
+  driver             Driver       @relation(fields: [driverId], references: [id])
+  offerType          OfferType
+  ratePence          Int
+  distanceToPickupKm Float?
+  etaMin             Int?
+  expiresAt          DateTime
+  status             OfferStatus  @default(pending)
+  createdAt          DateTime     @default(now())
+  @@index([jobId, status])
+}
+
+enum OfferType {
+  push
+  broadcast
+  exchange
+}
+
+enum OfferStatus {
+  pending
+  accepted
+  expired
+  retracted
+}
+
+model ComplianceDocument {
+  id             String            @id @default(uuid())
+  ownerType      OwnerType
+  ownerId        String
+  docType        DocType
+  provider       String?
+  policyNo       String?
+  coverageAmount Int?
+  effectiveFrom  DateTime?
+  expiresAt      DateTime?
+  status         ComplianceStatus  @default(pending)
+  fileUrl        String?
+  driverId       String?
+  driver         Driver?           @relation("DriverCompliance", fields: [driverId], references: [id])
+  createdAt      DateTime          @default(now())
+  @@index([ownerId, docType])
+}
+
+enum OwnerType {
+  driver
+  company
+}
+
+enum DocType {
+  GIT
+  HNR
+  PL
+  Licence
+  RTW
+  DBS
+}
+
+enum ComplianceStatus {
+  pending
+  approved
+  rejected
+}
+
+model ExchangePosting {
+  id                String          @id @default(uuid())
+  jobId             String
+  job               Job             @relation(fields: [jobId], references: [id])
+  exchange          Exchange
+  externalId        String?
+  status            ExchangeStatus  @default(posted)
+  priceOfferedPence Int?
+  createdAt         DateTime        @default(now())
+}
+
+enum Exchange {
+  SDCN
+  CX
+}
+
+enum ExchangeStatus {
+  posted
+  assigned
+  cancelled
+}
+
+model POD {
+  id          String   @id @default(uuid())
+  jobId       String   @unique
+  job         Job      @relation(fields: [jobId], references: [id])
+  pickedUpTs  DateTime?
+  deliveredTs DateTime?
+  sigImageUrl String?
+  photoUrls   Json?
+  geo         Json?
+}
+
+model Payment {
+  id                  String        @id @default(uuid())
+  jobId               String        @unique
+  job                 Job           @relation(fields: [jobId], references: [id])
+  customerAmountPence Int
+  currency            String        @default("GBP")
+  pspPaymentId        String?
+  status              PaymentStatus @default(authorised)
+  createdAt           DateTime      @default(now())
+}
+
+enum PaymentStatus {
+  authorised
+  captured
+  failed
+  refunded
+}
+
+model Payout {
+  id            String   @id @default(uuid())
+  jobId         String
+  job           Job      @relation(fields: [jobId], references: [id])
+  driverId      String
+  driver        Driver   @relation(fields: [driverId], references: [id])
+  amountPence   Int
+  fastPay       Boolean  @default(false)
+  dueDate       DateTime
+  paidAt        DateTime?
+  pspTransferId String?
+  createdAt     DateTime @default(now())
+  @@index([driverId, dueDate])
+}
+
+model AuditLog {
+  id      String   @id @default(uuid())
+  actorId String
+  action  String
+  ts      DateTime @default(now())
+  meta    Json?
+}
