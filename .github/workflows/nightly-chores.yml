@@ -1,0 +1,159 @@
+name: Nightly Chores
+on:
+  schedule: [{ cron: "0 2 * * *" }]   # 02:00 UTC nightly
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'pnpm' }
+      - run: corepack enable && corepack prepare pnpm@8.15.4 --activate
+      - name: Install
+        run: pnpm install
+
+      - name: Typecheck & Build API
+        run: pnpm --filter @apps/api build
+
+      - name: Typecheck & Build Console
+        run: pnpm --filter @apps/console build
+
+  pricing-regression:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'pnpm' }
+      - run: corepack enable && corepack prepare pnpm@8.15.4 --activate
+      - run: pnpm install
+      - name: Build & start API (DB skipped)
+        env: { PRISMA_SKIP_CONNECT: '1', PORT: '5050' }
+        run: |
+          pnpm --filter @apps/api build
+          node apps/api/dist/main.js & echo $! > api.pid
+          for i in {1..30}; do curl -sf http://127.0.0.1:5050/v1/healthz && break; sleep 1; done
+      - name: Run pricing checks
+        run: |
+          set -e
+          jq -re '.totalPence' <<<"$(curl -s -X POST http://127.0.0.1:5050/v1/pricing/quote \
+            -H "content-type: application/json" \
+            -d '{"pickup":{"lat":53.1913,"lng":-2.8919},"dropoff":{"lat":53.4808,"lng":-2.2426},"vehicleType":"SWB","when":"2026-01-02T09:00:00Z"}')" >/dev/null
+          LON=$(curl -s -X POST http://127.0.0.1:5050/v1/pricing/quote \
+            -H "content-type: application/json" \
+            -d '{"pickup":{"lat":51.5135,"lng":-0.0900},"dropoff":{"lat":51.5014,"lng":-0.1419},"vehicleType":"LWB","when":"2026-01-02T10:00:00Z"}')
+          echo "$LON" | jq -e '.surcharges | map(.code) | index("CC")' >/dev/null
+          echo "$LON" | jq -e '.surcharges | map(.code) | index("ULEZ")' >/dev/null
+      - name: Stop API
+        if: always()
+        run: kill $(cat api.pid) || true
+
+  notifications-p95:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'pnpm' }
+      - run: corepack enable && corepack prepare pnpm@8.15.4 --activate
+      - run: pnpm install
+      - name: Start API (DB skipped)
+        env: { PRISMA_SKIP_CONNECT: '1', PORT: '5050' }
+        run: |
+          pnpm --filter @apps/api build
+          node apps/api/dist/main.js & echo $! > api.pid
+          for i in {1..30}; do curl -sf http://127.0.0.1:5050/v1/healthz && break; sleep 1; done
+      - name: Enqueue 40 test emails (dev mode logs)
+        run: |
+          curl -s -X POST http://127.0.0.1:5050/v1/notifications/test \
+           -H "content-type: application/json" \
+           -d '{"channel":"email","to":"ops@parcelevo.com","count":40,"templateId":"offer_created","vars":{"jobId":"J-1","price":"120.00"}}' >/dev/null
+          sleep 1
+          METRICS=$(curl -s http://127.0.0.1:5050/v1/notifications/metrics)
+          echo "$METRICS" | jq .
+          P95=$(echo "$METRICS" | jq -r '.p95Ms // 0')
+          PROC=$(echo "$METRICS" | jq -r '.processed // 0')
+          if [ "$PROC" -lt 40 ]; then echo "Processed=$PROC < 40"; exit 1; fi
+          if [ "$P95" -gt 2000 ]; then echo "p95=$P95 > 2000ms"; exit 1; fi
+      - name: Stop API
+        if: always()
+        run: kill $(cat api.pid) || true
+
+  security-and-guardrails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'pnpm' }
+      - run: corepack enable && corepack prepare pnpm@8.15.4 --activate
+      - run: pnpm install
+      - name: npm audit (high+critical)
+        run: |
+          pnpm audit --prod --audit-level=high || true
+      - name: Bundle size budget (Console JS <= 2.5MB)
+        run: |
+          pnpm --filter @apps/console build
+          SIZE=$(du -sk apps/console/.next/static | awk '{print $1}')
+          echo "Static size (KB) = $SIZE"
+          if [ "$SIZE" -gt 2500 ]; then echo "Bundle too big"; exit 1; fi
+
+  prisma-sanity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'pnpm' }
+      - run: corepack enable && corepack prepare pnpm@8.15.4 --activate
+      - run: pnpm install
+      - name: Check for destructive diffs (format only)
+        run: |
+          pnpm --filter @apps/api prisma:generate
+          # prints diff; non-blocking now (tighten later)
+          pnpm --filter @apps/api prisma migrate diff --from-empty --to-schema-datamodel-path=apps/api/prisma/schema.prisma || true
+
+  # --- Enable this job once you want full DB/Redis acceptance in CI ---
+  # acceptance-e2e:
+  #   runs-on: ubuntu-latest
+  #   needs: build
+  #   services:
+  #     postgres:
+  #       image: postgres:16-alpine
+  #       env:
+  #         POSTGRES_PASSWORD: postgres
+  #         POSTGRES_USER: postgres
+  #         POSTGRES_DB: panel
+  #       ports: ["5432:5432"]
+  #       options: >-
+  #         --health-cmd="pg_isready -U postgres"
+  #         --health-interval=5s --health-timeout=5s --health-retries=10
+  #     redis:
+  #       image: redis:7-alpine
+  #       ports: ["6379:6379"]
+  #   env:
+  #     DATABASE_URL: postgres://postgres:postgres@localhost:5432/panel
+  #     REDIS_URL: redis://localhost:6379
+  #     PORT: 5050
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with: { node-version: '20', cache: 'pnpm' }
+  #     - run: corepack enable && corepack prepare pnpm@8.15.4 --activate
+  #     - run: pnpm install
+  #     - name: Prisma migrate & seed
+  #       run: |
+  #         pnpm --filter @apps/api prisma:generate
+  #         pnpm --filter @apps/api prisma:migrate --name init
+  #         pnpm --filter @apps/api prisma:seed
+  #     - name: Start API
+  #       run: node apps/api/dist/main.js & echo $! > api.pid
+  #     - name: Health
+  #       run: for i in {1..30}; do curl -sf http://127.0.0.1:5050/v1/healthz && break; sleep 1; done
+  #     - name: Exercise endpoints (extend later)
+  #       run: |
+  #         curl -s -X POST http://127.0.0.1:5050/v1/notifications/test -H "content-type: application/json" -d '{"channel":"email","to":"ops@parcelevo.com","count":10}' >/dev/null
+  #         curl -s http://127.0.0.1:5050/v1/notifications/metrics | jq .
+  #     - name: Stop API
+  #       if: always()
+  #       run: kill $(cat api.pid) || true
