@@ -1,0 +1,44 @@
+name: Nightly Chores
+on:
+  schedule: [{ cron: "0 2 * * *" }]
+  workflow_dispatch:
+
+jobs:
+  pricing-and-notify:
+    runs-on: ubuntu-latest
+    env:
+      PRISMA_SKIP_CONNECT: '1'
+      PORT: '5050'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'pnpm' }
+      - run: corepack enable && corepack prepare pnpm@8.15.4 --activate
+      - run: pnpm install
+      - run: pnpm --filter @apps/api build
+      - run: node apps/api/dist/main.js & echo $! > api.pid
+      - run: |
+          for i in {1..30}; do
+            curl -sf http://127.0.0.1:5050/v1/healthz && break
+            sleep 1
+          done
+      - name: Pricing (London surcharges)
+        run: |
+          LON=$(curl -s -X POST http://127.0.0.1:5050/v1/pricing/quote \
+            -H "content-type: application/json" \
+            -d '{"pickup":{"lat":51.5135,"lng":-0.0900},"dropoff":{"lat":51.5014,"lng":-0.1419},"vehicleType":"LWB","when":"2026-01-02T10:00:00Z"}')
+          echo "$LON" | jq -e '.surcharges | map(.code) | index("CC")' >/dev/null
+          echo "$LON" | jq -e '.surcharges | map(.code) | index("ULEZ")' >/dev/null
+      - name: Notifications p95
+        run: |
+          curl -s -X POST http://127.0.0.1:5050/v1/notifications/test \
+            -H "content-type: application/json" \
+            -d '{"channel":"email","to":"ops@parcelevo.com","count":30,"templateId":"offer_created","vars":{"jobId":"J-1","price":"120.00"}}' >/dev/null
+          METRICS=$(curl -s http://127.0.0.1:5050/v1/notifications/metrics)
+          echo "$METRICS" | jq .
+          P95=$(echo "$METRICS" | jq -r '.p95Ms // 0')
+          PROC=$(echo "$METRICS" | jq -r '.processed // 0')
+          test "$PROC" -ge 30
+          test "$P95" -le 2000
+      - if: always()
+        run: kill $(cat api.pid) || true
