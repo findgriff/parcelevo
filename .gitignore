@@ -1,0 +1,10 @@
+.DS_Store
+Thumbs.db
+node_modules/
+.cache/
+.pnpm-store/
+*.log
+.env
+.env.local
+.vscode/
+.idea/
